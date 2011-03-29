@@ -1,0 +1,6 @@
+; $Id: feeds_jsonpath_parser.info,v 1.1.4.2 2011/02/05 18:12:18 twistor Exp $
+name = Feeds GIT Repository Fetcher
+description = Fetch a remote GIT repository
+package = Feeds
+dependencies[] = feeds
+core = 7.x
