@@ -10,7 +10,7 @@
  * Definition of the import batch object created on the fetching stage by
  * FeedsGITFetcher.
  */
-class FeedsGITFetcherResult extends FeedsFetcherResult {
+class FeedsGITFetcherResult extends FeedsFileFetcherResult {
   /**
    * Constructor.
    */
@@ -23,8 +23,7 @@ class FeedsGITFetcherResult extends FeedsFetcherResult {
    * Overrides parent::getRaw();
    */
   public function getRaw() {
-    // TODO
-    return $this->sanitizeRaw(file_get_contents($this->file_path));
+    return $this->sanitizeRaw($this->repository_path);
   }
 
   /**
@@ -34,7 +33,7 @@ class FeedsGITFetcherResult extends FeedsFetcherResult {
     if (!is_dir($this->repository_path) && !is_dir($this->repository_path."/.git/")) {
       throw new Exception(t('Repository @repopath is not accessible.', array('@repopath' => $this->repository_path)));
     }
-    return $this->sanitizeFile($this->repository_path);
+    return $this->sanitizeRaw($this->repository_path);
   }
 }
 
@@ -49,33 +48,48 @@ class FeedsGITFetcher extends FeedsFetcher {
   public function fetch(FeedsSource $source) {
     $source_config = $source->getConfigFor($this);
 
-    $source_path = pathinfo($source_config['source']);
-    $respository_name = $source_path['filename'];
-    $uri = "public://feeds_git_fetcher/".$respository_name;
-    $path = drupal_realpath($uri);
+    $repository = basename($source_config['source'],'.git');
+    $path = $source_config['path'];
+		$realpath = drupal_realpath($path);
 
-    $cmd = "cd $path; ".GIT_PATH." pull";
-		
+    $cmd = "cd " 
+      . escapeshellarg($realpath) 
+      . "; "
+		  . escapeshellcmd($this->config['git_bin_path']) 
+      . " pull;";
 
-    // Just return a file fetcher result if this is a file.
-    if (is_file($source_config['source'])) {
-      return new FeedsGITFetcherResult($source_config['source']);
+    unset($output);
+		@exec($cmd,$output,$return_status);
+
+    // Make sure we've got a valid GIT repository that contains the .git directory
+    if (is_dir($path) && is_dir($path . '/.git/')) {
+      return new FeedsGITFetcherResult($path);
     }
 
-    // Batch if this is a directory.
-    $state = $source->state(FEEDS_FETCH);
+    throw new Exception(t('Repository is not valid or it is an empty directory: %path', array('%path' => $source_config['path'])));
+  }
+
+  /**
+   * Return an array of files in a directory.
+   *
+   * @param $dir
+   *   A stream wreapper URI that is a directory.
+   *
+   * @return
+   *   An array of stream wrapper URIs pointing to files. The array is empty
+   *   if no files could be found. Never contains directories.
+   */
+  protected function listFiles($dir) {
+    $dir = file_stream_wrapper_uri_normalize($dir);
     $files = array();
-    if (!isset($state->files)) {
-      $state->files = $this->listFiles($source_config['source']);
-      $state->total = count($state->files);
+    if ($items = @scandir($dir)) {
+      foreach ($items as $item) {
+        if (is_file("$dir/$item") && strpos($item, '.') !== 0) {
+          $files[] = "$dir/$item";
+        }
+      }
     }
-    if (count($state->files)) {
-      $file = array_shift($state->files);
-      $state->progress($state->total, $state->total - count($state->files));
-      return new FeedsGITFetcherResult($file);
-    }
-
-    throw new Exception(t('Resource is not a file or it is an empty directory: %source', array('%source' => $source_config['source'])));
+    return $files;
   }
 
   /**
@@ -83,11 +97,18 @@ class FeedsGITFetcher extends FeedsFetcher {
    */
   public function sourceForm($source_config) {
     $form = array();
-// TODO - Deal with changing the URL
+    $form['pre_source'] = array(
+      '#type' => 'value',
+      '#value' => empty($source_config['source']) ? 0 : $source_config['source'],
+    );
+    $form['path'] = array(
+      '#type' => 'value',
+      '#value' => empty($source_config['path']) ? 0 : $source_config['path'],
+    );
     $form['source'] = array(
       '#type' => 'textfield',
       '#title' => t('Repository URL'),
-      '#description' => t('Specify the repository URL.  ie. git@github.com:user/repo-name.git'),
+      '#description' => t('Specify the repository URL.  ie. git://github.com:user/repository.git (<a href="http://www.kernel.org/pub/software/scm/git/docs/git-clone.html#URLS" target="_new">Docs</a>).  Unless you\'ve configured your server to successfully handle all transport protocols, a GIT Read-Only protocol URL is recommended.'),
       '#default_value' => empty($source_config['source']) ? '' : $source_config['source'],
     );
     return $form;
@@ -97,36 +118,85 @@ class FeedsGITFetcher extends FeedsFetcher {
    * Override parent::sourceFormValidate().
    */
   public function sourceFormValidate(&$values) {
-    // TODO
-		// Verify the path ends in '.git'
-    // Verify that we can pull a pathinfo['filename'] from the path
-    // Attempt to clone, see if we have access
-    // Return an error message if we do not
+    $source = $values['source'];
 
-		// Check if that repository exists
-    $source_path = pathinfo($values['source']);
-		$respository_name = $source_path['filename'];
-		$uri = "public://feeds_git_fetcher/".$respository_name;
-		if(!file_prepare_directory($uri,FILE_CREATE_DIRECTORY)) {
-			exit('Couldnt create dir');
-		}
+    // Verify that they actually submitted something
+    if (empty($source)) {
+      form_set_error('feeds][source', t('Please specify a valid GIT repository URL.'));
+      return;
+    }
+
+    // Strip a trailing slash if necessary
+    if(substr($source,-1) == '/') {
+      $values['source'] = $source = substr($source,0,-1);
+    }
+
+    // Validate that the string provided ends in .git
+    if(strtolower(substr($source,-4,4)) != '.git') {
+      form_set_error('feeds][source', t('A Valid GIT Repository must end in \'.git\'. <a href="http://www.kernel.org/pub/software/scm/git/docs/git-clone.html#URLS" target="_new">See Documentation.</a>.'));
+      return;
+    }
+
+    // Parse the repository name
+    $repository = basename($source,'.git');
+    if(empty($repository)) {
+      form_set_error('feeds][source', t('Unable to successfully parse the repository name from the URL provided'));
+    }
   }
 
   /**
    * Override parent::sourceSave().
    */
   public function sourceSave(FeedsSource $source) {
+    // Ensure that our root directory has been created
+    $home_dir = 'public://feeds_git_fetcher/';
+    file_prepare_directory($home_dir, FILE_CREATE_DIRECTORY | FILE_MODIFY_PERMISSIONS);
+
+    // Extract and create all of the paths and names
     $source_config = $source->getConfigFor($this);
-    $source_path = pathinfo($source_config['source']);
-		$respository_name = $source_path['filename'];
 
-		$uri = "public://feeds_git_fetcher/".$respository_name;
-		$path = drupal_realpath($uri);
-		
+    // Editing a repository
+    if($source_config['source'] === $source_config['pre_source']) {
+      // DO NOTHING
+    }
+    // Creating a new repository
+    else {
 
-    //print_r($source_path['filename']);
-		$cmd = GIT_PATH . ' clone --recursive --origin feedsgitfetcher ' . $source_config['source'] . ' ' . $path;
-		@exec($cmd);
+      // If we have an old repository on disk, clean it up
+      if(!empty($source_config['pre_source']) && !empty($source_config['path'])) {
+        $path = $source_config['path'];
+		    file_unmanaged_delete_recursive($path);
+        drupal_set_message("Repository at $path has been deleted");
+      }
+
+      // Parse the new repository
+      $repository = basename($source_config['source'],'.git');
+      $path = file_create_filename($repository,$home_dir);
+      $source_config['path'] = $path;
+
+      // Create the repositories home directory
+      file_prepare_directory($path, FILE_CREATE_DIRECTORY | FILE_MODIFY_PERMISSIONS);
+
+		  $realpath = drupal_realpath($path);
+
+      // Clone the repository! Woot!
+		  $cmd = escapeshellcmd($this->config['git_bin_path']) 
+        . ' clone --recursive --origin origin ' 
+        . escapeshellarg($source_config['source']) 
+        . ' ' 
+        . escapeshellarg($realpath);
+
+      // TODO - Return a realistic error if this fails
+      unset($output);
+		  @exec($cmd,$output,$return_status);
+
+      if($return_status == 0) {
+        drupal_set_message("Repository ".$source_config['source']." has been successfully cloned!");
+      }
+      else {
+        drupal_set_message("Repository could not be cloned.  Please try changing the repository to a Read-Only URL or consult the documentation.");
+      }
+    }
 
     $source->setConfigFor($this, $source_config);
   }
@@ -135,20 +205,17 @@ class FeedsGITFetcher extends FeedsFetcher {
    * Override parent::sourceDelete().
    */
   public function sourceDelete(FeedsSource $source) {
-    $source_path = pathinfo($source_config['source']);
-		$respository_name = $source_path['filename'];
-		$uri = "public://feeds_git_fetcher/".$respository_name;
-		file_unmanaged_delete_recursive($uri);
+    $source_config = $source->getConfigFor($this);
+    $path = $source_config['path'];
+		file_unmanaged_delete_recursive($path);
   }
 
   /**
    * Override parent::configDefaults().
    */
   public function configDefaults() {
-    // TODO
     return array(
-      'allowed_extensions' => 'txt csv tsv xml opml',
-      'direct' => FALSE,
+      'git_bin_path' => '/usr/bin/git'
     );
   }
 
@@ -156,24 +223,14 @@ class FeedsGITFetcher extends FeedsFetcher {
    * Override parent::configForm().
    */
   public function configForm(&$form_state) {
-    // TODO
     $form = array();
-/*
-    $form['allowed_extensions'] = array(
+    $form['git_bin_path'] = array(
       '#type' =>'textfield',
-      '#title' => t('Allowed file extensions'),
-      '#description' => t('Allowed file extensions for upload.'),
-      '#default_value' => $this->config['allowed_extensions'],
+      '#title' => t('GIT Binary Path'),
+      '#description' => t('Filesystem path to the GIT binary.'),
+      '#required' => TRUE,
+      '#default_value' => empty($this->config['git_bin_path']) ? '/usr/bin/git' : $this->config['git_bin_path']
     );
-    $form['direct'] = array(
-      '#type' =>'checkbox',
-      '#title' => t('Supply path to file or directory directly'),
-      '#description' => t('For experts. Lets users specify a path to a file <em>or a directory of files</em> directly,
-        instead of a file upload through the browser. This is useful when the files that need to be imported
-        are already on the server.'),
-      '#default_value' => $this->config['direct'],
-    );
-*/
     return $form;
   }
 }
