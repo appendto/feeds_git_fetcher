@@ -149,7 +149,7 @@ class FeedsGITFetcher extends FeedsFetcher {
    */
   public function sourceSave(FeedsSource $source) {
     // Ensure that our root directory has been created
-    $home_dir = 'public://feeds_git_fetcher/';
+    $home_dir = 'private://feeds_git_fetcher/';
     file_prepare_directory($home_dir, FILE_CREATE_DIRECTORY | FILE_MODIFY_PERMISSIONS);
 
     // Extract and create all of the paths and names
@@ -181,10 +181,12 @@ class FeedsGITFetcher extends FeedsFetcher {
 
       // Clone the repository! Woot!
 		  $cmd = escapeshellcmd($this->config['git_bin_path']) 
-        . ' clone --recursive --origin origin ' 
+        . ' clone --origin origin ' 
         . escapeshellarg($source_config['source']) 
         . ' ' 
         . escapeshellarg($realpath);
+
+      //drupal_set_message('Cloning: '.$cmd);
 
       // TODO - Return a realistic error if this fails
       unset($output);
