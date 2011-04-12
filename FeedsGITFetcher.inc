@@ -155,13 +155,13 @@ class FeedsGITFetcher extends FeedsFetcher {
     // Extract and create all of the paths and names
     $source_config = $source->getConfigFor($this);
 
+
     // Editing a repository
     if($source_config['source'] === $source_config['pre_source']) {
       // DO NOTHING
     }
     // Creating a new repository
     else {
-
       // If we have an old repository on disk, clean it up
       if(!empty($source_config['pre_source']) && !empty($source_config['path'])) {
         $path = $source_config['path'];
@@ -173,6 +173,7 @@ class FeedsGITFetcher extends FeedsFetcher {
       $repository = basename($source_config['source'],'.git');
       $path = file_create_filename($repository,$home_dir);
       $source_config['path'] = $path;
+      $source_config['pre_source'] = $source_config['source'];
 
       // Create the repositories home directory
       file_prepare_directory($path, FILE_CREATE_DIRECTORY | FILE_MODIFY_PERMISSIONS);
